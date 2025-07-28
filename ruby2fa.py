@@ -4,7 +4,7 @@ import time
 import cv2
 import numpy as np
 from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QFileDialog, QInputDialog, QLineEdit, QComboBox, QListWidget, QListWidgetItem, QMessageBox, QDialog, QFormLayout, QCheckBox, QTabWidget
-from PyQt5.QtCore import QTimer
+from PyQt5.QtCore import QTimer, QEvent
 from pyzbar.pyzbar import decode
 from PIL import ImageGrab
 from cryptography.fernet import Fernet, InvalidToken
@@ -99,7 +99,7 @@ class SSHConfigDialog(QDialog):
         }
 
 class SettingsDialog(QDialog):
-    def __init__(self, parent=None, emailConfig=None, sshConfig=None):
+    def __init__(self, parent=None, emailConfig=None, sshConfig=None, lockTimeout=60, clipboardTimeout=10):
         super().__init__(parent)
         self.setWindowTitle('Settings')
         layout = QVBoxLayout(self)
@@ -109,6 +109,25 @@ class SettingsDialog(QDialog):
         self.tabs.addTab(self.emailTab, 'Email 3FA')
         self.tabs.addTab(self.sshTab, 'SSH Agent 3FA')
         layout.addWidget(self.tabs)
+        self.lockTimeoutBox = QComboBox()
+        self.lockTimeoutBox.addItems([str(x) for x in [60, 120, 300, 600, 900, 1800]])
+        self.lockTimeoutBox.setCurrentText(str(lockTimeout))
+        layout.addWidget(QLabel('Auto-lock timeout (seconds):'))
+        layout.addWidget(self.lockTimeoutBox)
+        self.clipboardTimeoutBox = QComboBox()
+        self.clipboardTimeoutBox.addItems([str(x) for x in [10, 15, 20, 25, 30]])
+        self.clipboardTimeoutBox.setCurrentText(str(clipboardTimeout))
+        layout.addWidget(QLabel('Clipboard clear timeout (seconds):'))
+        layout.addWidget(self.clipboardTimeoutBox)
+        # Backup/restore buttons
+        backupLayout = QHBoxLayout()
+        self.exportBtn = QPushButton('Export Encrypted Backup')
+        self.exportBtn.clicked.connect(self.exportBackup)
+        self.importBtn = QPushButton('Import Encrypted Backup')
+        self.importBtn.clicked.connect(self.importBackup)
+        backupLayout.addWidget(self.exportBtn)
+        backupLayout.addWidget(self.importBtn)
+        layout.addLayout(backupLayout)
         btnLayout = QHBoxLayout()
         self.okBtn = QPushButton('OK')
         self.okBtn.clicked.connect(self.accept)
@@ -117,8 +136,57 @@ class SettingsDialog(QDialog):
         btnLayout.addWidget(self.okBtn)
         btnLayout.addWidget(self.cancelBtn)
         layout.addLayout(btnLayout)
+        self.parentWidget = parent
     def getConfigs(self):
-        return self.emailTab.getConfig(), self.sshTab.getConfig()
+        return (self.emailTab.getConfig(), self.sshTab.getConfig(), int(self.lockTimeoutBox.currentText()), int(self.clipboardTimeoutBox.currentText()))
+    def exportBackup(self):
+        if not self.parentWidget or not hasattr(self.parentWidget, 'secrets') or not hasattr(self.parentWidget, 'key'):
+            QMessageBox.warning(self, 'Export Error', 'No secrets to export!')
+            return
+        path, _ = QFileDialog.getSaveFileName(self, 'Export Encrypted Backup', '', 'Encrypted Files (*.enc)')
+        if not path:
+            return
+        data = json.dumps(self.parentWidget.secrets)
+        enc = encryptData(data, self.parentWidget.key)
+        with open(path, 'wb') as f:
+            f.write(enc)
+        QMessageBox.information(self, 'Export Complete', 'Encrypted backup exported successfully!')
+    def importBackup(self):
+        if not self.parentWidget or not hasattr(self.parentWidget, 'key'):
+            QMessageBox.warning(self, 'Import Error', 'No key available!')
+            return
+        path, _ = QFileDialog.getOpenFileName(self, 'Import Encrypted Backup', '', 'Encrypted Files (*.enc)')
+        if not path:
+            return
+        try:
+            with open(path, 'rb') as f:
+                enc = f.read()
+            data = decryptData(enc, self.parentWidget.key)
+            secretsDict = json.loads(data)
+            self.parentWidget.secrets = secretsDict
+            self.parentWidget.saveSecrets()
+            self.parentWidget.refreshAccounts()
+            QMessageBox.information(self, 'Import Complete', 'Encrypted backup imported successfully!')
+        except Exception as e:
+            QMessageBox.warning(self, 'Import Error', f'Failed to import backup: {e}')
+
+class LockDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('Session Locked')
+        layout = QVBoxLayout(self)
+        self.infoLbl = QLabel('Session locked due to inactivity. Please re-enter your master password.')
+        self.pwdEdit = QLineEdit()
+        self.pwdEdit.setEchoMode(QLineEdit.Password)
+        layout.addWidget(self.infoLbl)
+        layout.addWidget(self.pwdEdit)
+        btnLayout = QHBoxLayout()
+        self.okBtn = QPushButton('Unlock')
+        self.okBtn.clicked.connect(self.accept)
+        btnLayout.addWidget(self.okBtn)
+        layout.addLayout(btnLayout)
+    def getPassword(self):
+        return self.pwdEdit.text()
 
 class Ruby2FA(QWidget):
     def __init__(self):
@@ -128,15 +196,64 @@ class Ruby2FA(QWidget):
         self.currentLabel = None
         self.key = None
         self.gitWarning = self.checkGitTracked()
+        self.lockTimeout = 60
+        self.clipboardTimeout = 10
+        self.lastActivity = time.time()
+        self.installEventFilter(self)
         self.initPassword()
         self.initUi()
         self.timer = QTimer()
         self.timer.timeout.connect(self.updateTotp)
         self.timer.start(1000)
+        self.lockTimer = QTimer()
+        self.lockTimer.timeout.connect(self.checkAutoLock)
+        self.lockTimer.start(10000)
+        self.clipboardTimer = QTimer()
+        self.clipboardTimer.setSingleShot(True)
+        self.clipboardTimer.timeout.connect(self.clearClipboard)
+        self.clipboardCountdownTimer = QTimer()
+        self.clipboardCountdownTimer.timeout.connect(self.updateClipboardCountdown)
+        self.clipboardCountdown = 0
         self.emailConfig = None
         self.loadEmailConfig()
         self.sshConfig = None
         self.loadSSHConfig()
+
+    def eventFilter(self, obj, event):
+        if event.type() in [QEvent.MouseMove, QEvent.KeyPress, QEvent.MouseButtonPress]:
+            self.lastActivity = time.time()
+        return super().eventFilter(obj, event)
+
+    def checkAutoLock(self):
+        if time.time() - self.lastActivity > self.lockTimeout:
+            self.lockApp()
+
+    def lockApp(self):
+        # Hide sensitive info
+        self.setSensitiveUiVisible(False)
+        dlg = LockDialog(self)
+        while True:
+            if dlg.exec_():
+                pwd = dlg.getPassword()
+                pwdHash = pbkdf2Hash(pwd, base64.b64decode(self.getStoredSalt()))
+                if self.verifyPassword(pwd, pwdHash):
+                    self.lastActivity = time.time()
+                    break
+            else:
+                sys.exit(0)
+        # Restore sensitive info
+        self.setSensitiveUiVisible(True)
+
+    def getStoredSalt(self):
+        with open(MASTER_HASH_FILE, 'r') as f:
+            data = json.load(f)
+        return data['salt']
+
+    def verifyPassword(self, pwd, pwdHash):
+        with open(MASTER_HASH_FILE, 'r') as f:
+            data = json.load(f)
+        storedHash = base64.b64decode(data['hash'])
+        return secrets.compare_digest(pbkdf2Hash(pwd, base64.b64decode(data['salt'])), storedHash)
 
     def checkGitTracked(self):
         tracked = []
@@ -234,10 +351,17 @@ class Ruby2FA(QWidget):
         self.copyBtn = QPushButton('Copy Code')
         self.copyBtn.setStyleSheet('font-size: 12pt;')
         self.copyBtn.clicked.connect(self.copyCode)
+        self.clipboardCountdownLbl = QLabel()
+        self.clipboardCountdownLbl.setStyleSheet('font-size: 12pt; color: #888;')
+        self.clipboardClearedLbl = QLabel()
+        self.clipboardClearedLbl.setStyleSheet('font-size: 12pt; color: #4caf50;')
+        self.clipboardClearedLbl.hide()
         rightLayout.addWidget(self.infoLbl)
         rightLayout.addWidget(self.codeLbl)
         rightLayout.addWidget(self.expireLbl)
         rightLayout.addWidget(self.copyBtn)
+        rightLayout.addWidget(self.clipboardCountdownLbl)
+        rightLayout.addWidget(self.clipboardClearedLbl)
         rightLayout.addStretch(1)
         mainLayout.addLayout(rightLayout, 2)
         self.setLayout(mainLayout)
@@ -334,15 +458,39 @@ class Ruby2FA(QWidget):
     def copyCode(self):
         if self.totp:
             QApplication.clipboard().setText(self.codeLbl.text())
+            self.clipboardCountdown = self.clipboardTimeout
+            self.updateClipboardCountdown()
+            self.clipboardCountdownLbl.show()
+            self.clipboardClearedLbl.hide()
+            self.clipboardTimer.start(self.clipboardTimeout * 1000)
+            self.clipboardCountdownTimer.start(1000)
+
+    def updateClipboardCountdown(self):
+        if self.clipboardCountdown > 0:
+            self.clipboardCountdownLbl.setText(f'Clipboard will clear in {self.clipboardCountdown}s')
+            self.clipboardCountdown -= 1
+        else:
+            self.clipboardCountdownLbl.setText('')
+            self.clipboardCountdownTimer.stop()
+
+    def clearClipboard(self):
+        QApplication.clipboard().clear()
+        self.clipboardClearedLbl.setText('Clipboard cleared!')
+        self.clipboardClearedLbl.show()
+        self.clipboardCountdownLbl.setText('')
+        self.clipboardCountdownTimer.stop()
+        QTimer.singleShot(3000, self.clipboardClearedLbl.hide)
 
     def openSettings(self):
-        dlg = SettingsDialog(self, getattr(self, 'emailConfig', None), getattr(self, 'sshConfig', None))
+        dlg = SettingsDialog(self, getattr(self, 'emailConfig', None), getattr(self, 'sshConfig', None), self.lockTimeout, self.clipboardTimeout)
         if dlg.exec_():
-            emailCfg, sshCfg = dlg.getConfigs()
+            emailCfg, sshCfg, lockTimeout, clipboardTimeout = dlg.getConfigs()
             self.emailConfig = emailCfg
             self.saveEmailConfig()
             self.sshConfig = sshCfg
             self.saveSSHConfig()
+            self.lockTimeout = lockTimeout
+            self.clipboardTimeout = clipboardTimeout
 
     def editEmailConfig(self):
         cfg = getattr(self, 'emailConfig', None)
@@ -411,6 +559,23 @@ class Ruby2FA(QWidget):
         except Exception as e:
             QMessageBox.warning(self, 'Email Error', f'Failed to send 3FA code: {e}')
             return False
+
+    def setSensitiveUiVisible(self, visible):
+        # Hide or show sensitive widgets
+        if hasattr(self, 'accountList'):
+            self.accountList.setVisible(visible)
+        if hasattr(self, 'codeLbl'):
+            self.codeLbl.setVisible(visible)
+        if hasattr(self, 'expireLbl'):
+            self.expireLbl.setVisible(visible)
+        if hasattr(self, 'copyBtn'):
+            self.copyBtn.setVisible(visible)
+        if hasattr(self, 'clipboardCountdownLbl'):
+            self.clipboardCountdownLbl.setVisible(visible)
+        if hasattr(self, 'clipboardClearedLbl'):
+            self.clipboardClearedLbl.setVisible(visible)
+        if hasattr(self, 'infoLbl'):
+            self.infoLbl.setVisible(visible)
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
