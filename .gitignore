@@ -1,3 +1,4 @@
 secrets.json.enc
 master.hash
 *.enc
+rubykey.json.enc

@@ -12,7 +12,7 @@ This includes:
 
 * Copy to clipboard, and auto-clears clipboard afterwards
 
-* Recoverable so long as you have the secrets.json.env file, please back it up if it's important
+* Recoverable so long as you have the rubykey.json.env file, please back it up if it's important
 
 * Open source and offline, only connects to an email server for optional 3fa
 
@@ -70,7 +70,7 @@ This includes:
    - The clipboard will auto-clear after a few seconds.
 
 7. **Backup your secrets**  
-   - Backup your `secrets.json.enc` file to keep your accounts safe.
+   - Backup your `rubykey.json.enc` file to keep your accounts safe.
 
 8. **Enable 3FA (optional)**  
    - Open "Settings" in the app to configure email or SSH 3FA for extra security.
