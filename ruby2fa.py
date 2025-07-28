@@ -17,7 +17,7 @@ import subprocess
 import smtplib
 from email.mime.text import MIMEText
 
-SECRETS_FILE = 'secrets.json.enc'
+SECRETS_FILE = 'rubykey.json.enc'
 MASTER_HASH_FILE = 'master.hash'
 PBKDF2_ITER = 200_000
 
