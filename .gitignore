@@ -1,4 +1,10 @@
+# Ignore all secrets-related files, but keep the directory so it doesn't need to be made 
+
+# specific files
 secrets.json.enc
 master.hash
 *.enc
 rubykey.json.enc
+rubykeys/*.enc
+rubykeys/*.hash
+import.txt
