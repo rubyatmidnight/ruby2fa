@@ -12,7 +12,7 @@ This includes:
 
 * Copy to clipboard, and auto-clears clipboard afterwards on a configured timer
 
-* Recoverable so long as you have the rubykey.json.env file, please back it up if it's very important
+* Recoverable so long as you have the rubykey.json.enc file, please back it up if it's very important
 
 * Open source and offline
 
