@@ -103,16 +103,24 @@ Keep your backup and password safe.
 ## Common concerns
 
 Q. Can I rename my entries?
+
    A. No, for security reasons, it's best to not have the names be changeable. Set up a new key if you need to change the name. 
 
 Q. Can I move folder order?
+
    A. Same answer as above; you will have to delete the folder and remake it. The location and order of the folders is relevant to its security.
 
 Q. It keeps locking on me
+
    A. In Settings, change the timer. It should have asked you for a default on first run, if it's not broken
 
 Q. It's not capturing the QR code on my second monitor
+
    A. Primary monitor only. Drag it over
 
 Q. It can't find the QR code and it's right on my desktop
+
    A. Make sure your mouse pointer is not covering part of it
+
+Q. Why is markdown so annoying sometimes
+   A. because it is
