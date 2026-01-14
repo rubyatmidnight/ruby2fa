@@ -1,8 +1,6 @@
 import sys
 import pyotp
 import time
-import cv2
-import numpy as np
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
@@ -11,10 +9,9 @@ from PyQt5.QtWidgets import (
     QTreeWidget, QTreeWidgetItem, QAbstractItemView
 )
 from PyQt5.QtCore import QTimer, QEvent, Qt
-from pyzbar.pyzbar import decode
-from PIL import ImageGrab
 from cryptography.fernet import Fernet, InvalidToken
 import base64
+import binascii
 import os
 import json
 import hashlib
@@ -49,6 +46,22 @@ def decryptData(token, key):
 
 def pbkdf2Hash(password, salt):
     return hashlib.pbkdf2_hmac('sha256', password.encode(), salt, PBKDF2_ITER)
+
+def normalizeTotpSecret(secret):
+    if not isinstance(secret, str):
+        return ''
+    cleaned = ''.join(ch for ch in secret if not (ch.isspace() or ch == '-'))
+    return cleaned.upper()
+
+def isValidTotpSecret(secret):
+    if not secret:
+        return False
+    padding = '=' * ((8 - len(secret) % 8) % 8)
+    try:
+        base64.b32decode(secret + padding, casefold=True)
+        return True
+    except (binascii.Error, ValueError):
+        return False
 
 import random
 import string
@@ -171,6 +184,7 @@ class Ruby2FA(QWidget):
         self.lockTimeout = 180  # Default to 3 minutes
         self.clipboardTimeout = 10
         self.lastActivity = time.time()
+        self.invalidSecret = False
         self.installEventFilter(self)
         self.initPassword()
         self.initUi()
@@ -326,12 +340,6 @@ class Ruby2FA(QWidget):
         self.accountTree.setSelectionMode(QAbstractItemView.SingleSelection)
         self.accountTree.itemSelectionChanged.connect(self.accountSelected)
         leftLayout.addWidget(self.accountTree)
-        btnLayout = QHBoxLayout()
-        self.scanBtn = QPushButton('Scan QR')
-        self.scanBtn.setStyleSheet('font-size: 12pt;')
-        self.scanBtn.clicked.connect(self.scanQrFromScreen)
-        btnLayout.addWidget(self.scanBtn)
-        leftLayout.addLayout(btnLayout)
         self.menuBtn = QPushButton('Menu')
         self.menuBtn.setStyleSheet('font-size: 12pt;')
         self.menuBtn.clicked.connect(self.openMenuDialog)
@@ -468,67 +476,32 @@ class Ruby2FA(QWidget):
                     self.saveSecrets()
                     self.refreshAccounts()
 
-    def switchAccount(self, folder, label):
-        entries = self.secrets[folder]
-        entry = next((e for e in entries if isinstance(e, dict) and e['label'] == label and not isDummyEntry(e)), None)
-        if entry:
-            self.totp = pyotp.TOTP(entry['secret'])
-            self.currentLabel = entry['label']
-            self.updateTotp()
-        else:
-            self.totp = None
-            self.nameLbl.setText('Meowdy!')
-            self.codeLbl.setText('------')
-            self.expireLbl.setText(' ')
-
     def updateTotp(self):
+        if self.invalidSecret:
+            return
         if not self.totp:
             self.nameLbl.setText('Meowdy!')
             self.codeLbl.setText('------')
             self.expireLbl.setText(' ')
             return
-        code = self.totp.now()
+        try:
+            code = self.totp.now()
+        except (binascii.Error, ValueError):
+            self.setInvalidSecretState(self.currentLabel)
+            return
         secs = 30 - int(time.time()) % 30
         self.nameLbl.setText(f'{self.currentLabel}')
         self.codeLbl.setText(code)
         self.expireLbl.setText(f'Expires in: {secs}s')
 
-    def scanQrFromScreen(self):
-        self.infoLbl.setText('Scanning... mewmews!')
-        img = ImageGrab.grab()
-        imgNp = np.array(img)
-        imgBgr = cv2.cvtColor(imgNp, cv2.COLOR_RGB2BGR)
-        qrCodes = decode(imgBgr)
-        if qrCodes:
-            for qr in qrCodes:
-                data = qr.data.decode('utf-8')
-                if data.startswith('otpauth://'):
-                    try:
-                        otp = pyotp.parse_uri(data)
-                        label, ok = QInputDialog.getText(self, 'Account Label', 'Enter a name for this account:')
-                        if not ok or not label:
-                            self.infoLbl.setText('Cancelled!')
-                            return
-                        folder, ok = QInputDialog.getText(self, 'Folder', 'Enter folder name:')
-                        if not ok or not folder:
-                            self.infoLbl.setText('Cancelled!')
-                            return
-                        entry = {"label": label, "secret": otp.secret, "dummy": False}
-                        if folder not in self.secrets:
-                            self.secrets[folder] = []
-                        self.secrets[folder].append(entry)
-                        self.saveSecrets()
-                        self.refreshAccounts()
-                        self.infoLbl.setText("QR scanned & imported! :3")
-                        return
-                    except Exception:
-                        self.infoLbl.setText("Invalid QR code!")
-                        return
-            self.infoLbl.setText('No valid OTP QR code found!')
-            QTimer.singleShot(5000, lambda: self.infoLbl.setText(''))
-        else:
-            self.infoLbl.setText("Unable to find QR code!")
-            QTimer.singleShot(5000, lambda: self.infoLbl.setText(''))
+    def setInvalidSecretState(self, label, reason='Check entry'):
+        self.totp = None
+        self.invalidSecret = True
+        self.currentLabel = label
+        self.nameLbl.setText(label or 'Meowdy!')
+        self.codeLbl.setText('Invalid secret')
+        self.expireLbl.setText(reason)
+
 
     def copyCode(self):
         if self.totp:
@@ -630,14 +603,21 @@ class Ruby2FA(QWidget):
         self.refreshAccounts()
 
     def switchAccount(self, folder, label):
-        entries = self.secrets[folder]
+        entries = self.secrets.get(folder, [])
         entry = next((e for e in entries if isinstance(e, dict) and e['label'] == label and not isDummyEntry(e)), None)
         if entry:
-            self.totp = pyotp.TOTP(entry['secret'])
+            sanitized = normalizeTotpSecret(entry.get('secret', ''))
+            if not sanitized or not isValidTotpSecret(sanitized):
+                self.setInvalidSecretState(entry.get('label'))
+                return
+            self.invalidSecret = False
+            self.totp = pyotp.TOTP(sanitized)
             self.currentLabel = entry['label']
             self.updateTotp()
         else:
             self.totp = None
+            self.currentLabel = None
+            self.invalidSecret = False
             self.nameLbl.setText('Meowdy!')
             self.codeLbl.setText('------')
             self.expireLbl.setText('')
