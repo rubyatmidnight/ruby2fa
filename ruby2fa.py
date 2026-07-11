@@ -28,6 +28,7 @@ import urllib.parse
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 SECRETS_FILE = os.path.join(BASE_DIR, 'rubykeys', 'rubykey.json.enc')
 MASTER_HASH_FILE = os.path.join(BASE_DIR, 'rubykeys', 'master.hash')
+SETTINGS_FILE = os.path.join(BASE_DIR, 'rubykeys', 'settings.json.enc')
 PBKDF2_ITER = 200_000
 iconPath = os.path.join(BASE_DIR, 'rubykey.ico')
 
@@ -162,8 +163,12 @@ class LockDialog(QDialog):
         self.infoLbl = QLabel('Session locked due to inactivity. Please re-enter your master password.')
         self.pwdEdit = QLineEdit()
         self.pwdEdit.setEchoMode(QLineEdit.Password)
+        self.pwdEdit.returnPressed.connect(self.accept)
+        self.errorLbl = QLabel('')
+        self.errorLbl.setStyleSheet('color: red;')
         layout.addWidget(self.infoLbl)
         layout.addWidget(self.pwdEdit)
+        layout.addWidget(self.errorLbl)
         btnLayout = QHBoxLayout()
         self.okBtn = QPushButton('Unlock')
         self.okBtn.clicked.connect(self.accept)
@@ -171,6 +176,10 @@ class LockDialog(QDialog):
         layout.addLayout(btnLayout)
     def getPassword(self):
         return self.pwdEdit.text()
+    def showError(self, message):
+        self.errorLbl.setText(message)
+        self.pwdEdit.clear()
+        self.pwdEdit.setFocus()
 
 class Ruby2FA(QWidget):
     def __init__(self):
@@ -187,6 +196,7 @@ class Ruby2FA(QWidget):
         self.invalidSecret = False
         self.installEventFilter(self)
         self.initPassword()
+        self.loadSettings()
         self.initUi()
         self.timer = QTimer()
         self.timer.timeout.connect(self.updateTotp)
@@ -221,6 +231,8 @@ class Ruby2FA(QWidget):
                 if self.verifyPassword(pwd, pwdHash):
                     self.lastActivity = time.time()
                     break
+                else:
+                    dlg.showError('Incorrect password. Please try again.')
             else:
                 sys.exit(0)
         self.setSensitiveUiVisible(True)
@@ -239,8 +251,8 @@ class Ruby2FA(QWidget):
     def checkGitTracked(self):
         tracked = []
         try:
-            out = subprocess.check_output(['git', 'ls-files'], encoding='utf-8')
-            files = out.splitlines()
+            out = subprocess.check_output(['git', 'ls-files'], encoding='utf-8', cwd=BASE_DIR)
+            files = {os.path.abspath(os.path.join(BASE_DIR, f)) for f in out.splitlines()}
             for fname in [SECRETS_FILE, MASTER_HASH_FILE]:
                 if fname in files:
                     tracked.append(fname)
@@ -249,8 +261,9 @@ class Ruby2FA(QWidget):
         return tracked
 
     def initPassword(self):
+        prompt = 'Enter master password:'
         while True:
-            pwd, ok = QInputDialog.getText(self, 'Master Password', 'Enter master password:', QLineEdit.Password)
+            pwd, ok = QInputDialog.getText(self, 'Master Password', prompt, QLineEdit.Password)
             if not ok:
                 sys.exit(0)
             if os.path.exists(MASTER_HASH_FILE):
@@ -260,6 +273,7 @@ class Ruby2FA(QWidget):
                 storedHash = base64.b64decode(data['hash'])
                 pwdHash = pbkdf2Hash(pwd, salt)
                 if not secrets.compare_digest(pwdHash, storedHash):
+                    prompt = 'Incorrect password. Enter master password:'
                     continue
             else:
                 salt = secrets.token_bytes(16)
@@ -276,11 +290,34 @@ class Ruby2FA(QWidget):
                     self.key = key
                     break
                 except (InvalidToken, json.JSONDecodeError):
+                    prompt = 'Incorrect password or corrupted data. Enter master password:'
                     continue
             else:
                 self.secrets = {}
                 self.key = key
                 break
+
+    def loadSettings(self):
+        if not self.key or not os.path.exists(SETTINGS_FILE):
+            return
+        try:
+            with open(SETTINGS_FILE, 'rb') as f:
+                enc = f.read()
+            data = json.loads(decryptData(enc, self.key))
+        except (InvalidToken, json.JSONDecodeError):
+            return
+        if isinstance(data.get('lockTimeout'), int):
+            self.lockTimeout = data['lockTimeout']
+        if isinstance(data.get('clipboardTimeout'), int):
+            self.clipboardTimeout = data['clipboardTimeout']
+
+    def saveSettings(self):
+        if not self.key:
+            return
+        data = json.dumps({'lockTimeout': self.lockTimeout, 'clipboardTimeout': self.clipboardTimeout})
+        enc = encryptData(data, self.key)
+        with open(SETTINGS_FILE, 'wb') as f:
+            f.write(enc)
 
     def saveSecrets(self):
         secretsCopy = {}
@@ -385,6 +422,7 @@ class Ruby2FA(QWidget):
         self.nameLbl.setText('Meowdy!')
         self.codeLbl.setText('------')
         self.expireLbl.setText(' ')
+        self.copyBtn.setEnabled(False)
         QTimer.singleShot(3000, self.refreshAccounts)
         self.refreshAccounts()
 
@@ -447,11 +485,33 @@ class Ruby2FA(QWidget):
             label, ok = QInputDialog.getText(self, 'Account Label', 'Enter a name for this account:')
             if not ok or not label:
                 return
-            secret, ok = QInputDialog.getText(self, 'Secret', 'Enter the TOTP secret:')
-            if not ok or not secret:
-                return
-            folder, ok = QInputDialog.getText(self, 'Folder', 'Enter folder name:')
+            secretPrompt = 'Enter the TOTP secret:'
+            while True:
+                secret, ok = QInputDialog.getText(self, 'Secret', secretPrompt)
+                if not ok or not secret:
+                    return
+                sanitized = normalizeTotpSecret(secret)
+                if sanitized and isValidTotpSecret(sanitized):
+                    secret = sanitized
+                    break
+                QMessageBox.warning(self, 'Invalid Secret', 'That does not look like a valid TOTP secret (base32-encoded). Please check it and try again.')
+                secretPrompt = 'Enter the TOTP secret (base32, e.g. JBSWY3DPEHPK3PXP):'
+            existingFolders = list(self.secrets.keys())
+            if existingFolders:
+                folder, ok = QInputDialog.getItem(
+                    self, 'Folder', 'Choose an existing folder, or type a new name:',
+                    existingFolders, 0, True
+                )
+            else:
+                folder, ok = QInputDialog.getText(self, 'Folder', 'Enter a folder name:')
             if not ok or not folder:
+                return
+            folder = folder.strip()
+            if not folder:
+                return
+            existing = self.secrets.get(folder, [])
+            if any(isinstance(e, dict) and not isDummyEntry(e) and e.get('label') == label for e in existing):
+                QMessageBox.warning(self, 'Duplicate Label', f'An account named "{label}" already exists in folder "{folder}". Choose a different label or folder.')
                 return
             entry = {"label": label, "secret": secret, "dummy": False}
             if folder not in self.secrets:
@@ -483,6 +543,7 @@ class Ruby2FA(QWidget):
             self.nameLbl.setText('Meowdy!')
             self.codeLbl.setText('------')
             self.expireLbl.setText(' ')
+            self.copyBtn.setEnabled(False)
             return
         try:
             code = self.totp.now()
@@ -493,6 +554,7 @@ class Ruby2FA(QWidget):
         self.nameLbl.setText(f'{self.currentLabel}')
         self.codeLbl.setText(code)
         self.expireLbl.setText(f'Expires in: {secs}s')
+        self.copyBtn.setEnabled(True)
 
     def setInvalidSecretState(self, label, reason='Check entry'):
         self.totp = None
@@ -501,6 +563,7 @@ class Ruby2FA(QWidget):
         self.nameLbl.setText(label or 'Meowdy!')
         self.codeLbl.setText('Invalid secret')
         self.expireLbl.setText(reason)
+        self.copyBtn.setEnabled(False)
 
 
     def copyCode(self):
@@ -535,6 +598,7 @@ class Ruby2FA(QWidget):
             lockTimeout, clipboardTimeout = dlg.getConfigs()
             self.lockTimeout = lockTimeout
             self.clipboardTimeout = clipboardTimeout
+            self.saveSettings()
 
     # Remove editEmailConfig, saveEmailConfig, loadEmailConfig
     # Remove editSSHConfig, saveSSHConfig, loadSSHConfig
@@ -621,6 +685,7 @@ class Ruby2FA(QWidget):
             self.nameLbl.setText('Meowdy!')
             self.codeLbl.setText('------')
             self.expireLbl.setText('')
+            self.copyBtn.setEnabled(False)
 
     def saveSecretsFlat(self):
         # Save flat secrets for backwards compatibility
@@ -740,17 +805,27 @@ class OrganizeAccountsDialog(QDialog):
         if not folder or idx < 0:
             return
         label = self.accountList.item(idx).text()
-        # Find and remove from current folder
-        for f in (self.parentWidget.secrets if self.parentWidget.secrets else ['Default']):
-            entries = self.parentWidget.secrets.get(f, [])
-            for i, entry in enumerate(entries):
-                if entry['label'] == label:
-                    entryToMove = entries.pop(i)
-                    break
-        # Ask for new folder
-        newFolder, ok = QInputDialog.getText(self, 'Move to Folder', 'Enter folder name:')
+        # Find and remove from the currently selected folder only
+        entries = self.parentWidget.secrets.get(folder, [])
+        entryIdx = next((i for i, e in enumerate(entries) if isinstance(e, dict) and not isDummyEntry(e) and e.get('label') == label), None)
+        if entryIdx is None:
+            QMessageBox.warning(self, 'Move Error', f'Could not find account "{label}" in folder "{folder}".')
+            return
+        # Ask for new folder before mutating anything, so a cancel is a true no-op
+        otherFolders = [f for f in self.parentWidget.secrets.keys() if f != folder]
+        if otherFolders:
+            newFolder, ok = QInputDialog.getItem(
+                self, 'Move to Folder', 'Choose an existing folder, or type a new name:',
+                otherFolders, 0, True
+            )
+        else:
+            newFolder, ok = QInputDialog.getText(self, 'Move to Folder', 'Enter a folder name:')
         if not ok or not newFolder:
             return
+        newFolder = newFolder.strip()
+        if not newFolder or newFolder == folder:
+            return
+        entryToMove = entries.pop(entryIdx)
         if newFolder not in self.parentWidget.secrets:
             self.parentWidget.secrets[newFolder] = []
         self.parentWidget.secrets[newFolder].append(entryToMove)
@@ -797,6 +872,7 @@ if __name__ == '__main__':
     if firstLaunch:
         win.lockTimeout = lockTimeout
         win.clipboardTimeout = clipboardTimeout
+        win.saveSettings()
     win.show()
 
     sys.exit(app.exec_())

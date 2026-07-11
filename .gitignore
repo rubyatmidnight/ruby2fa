@@ -8,3 +8,7 @@ rubykey.json.enc
 rubykeys/*.enc
 rubykeys/*.hash
 import.txt
+
+# Python build artifacts
+__pycache__/
+*.pyc
