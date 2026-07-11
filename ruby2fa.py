@@ -28,6 +28,7 @@ import urllib.parse
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 SECRETS_FILE = os.path.join(BASE_DIR, 'rubykeys', 'rubykey.json.enc')
 MASTER_HASH_FILE = os.path.join(BASE_DIR, 'rubykeys', 'master.hash')
+SETTINGS_FILE = os.path.join(BASE_DIR, 'rubykeys', 'settings.json.enc')
 PBKDF2_ITER = 200_000
 iconPath = os.path.join(BASE_DIR, 'rubykey.ico')
 
@@ -195,6 +196,7 @@ class Ruby2FA(QWidget):
         self.invalidSecret = False
         self.installEventFilter(self)
         self.initPassword()
+        self.loadSettings()
         self.initUi()
         self.timer = QTimer()
         self.timer.timeout.connect(self.updateTotp)
@@ -294,6 +296,28 @@ class Ruby2FA(QWidget):
                 self.secrets = {}
                 self.key = key
                 break
+
+    def loadSettings(self):
+        if not self.key or not os.path.exists(SETTINGS_FILE):
+            return
+        try:
+            with open(SETTINGS_FILE, 'rb') as f:
+                enc = f.read()
+            data = json.loads(decryptData(enc, self.key))
+        except (InvalidToken, json.JSONDecodeError):
+            return
+        if isinstance(data.get('lockTimeout'), int):
+            self.lockTimeout = data['lockTimeout']
+        if isinstance(data.get('clipboardTimeout'), int):
+            self.clipboardTimeout = data['clipboardTimeout']
+
+    def saveSettings(self):
+        if not self.key:
+            return
+        data = json.dumps({'lockTimeout': self.lockTimeout, 'clipboardTimeout': self.clipboardTimeout})
+        enc = encryptData(data, self.key)
+        with open(SETTINGS_FILE, 'wb') as f:
+            f.write(enc)
 
     def saveSecrets(self):
         secretsCopy = {}
@@ -574,6 +598,7 @@ class Ruby2FA(QWidget):
             lockTimeout, clipboardTimeout = dlg.getConfigs()
             self.lockTimeout = lockTimeout
             self.clipboardTimeout = clipboardTimeout
+            self.saveSettings()
 
     # Remove editEmailConfig, saveEmailConfig, loadEmailConfig
     # Remove editSSHConfig, saveSSHConfig, loadSSHConfig
@@ -847,6 +872,7 @@ if __name__ == '__main__':
     if firstLaunch:
         win.lockTimeout = lockTimeout
         win.clipboardTimeout = clipboardTimeout
+        win.saveSettings()
     win.show()
 
     sys.exit(app.exec_())
