@@ -472,8 +472,18 @@ class Ruby2FA(QWidget):
                     break
                 QMessageBox.warning(self, 'Invalid Secret', 'That does not look like a valid TOTP secret (base32-encoded). Please check it and try again.')
                 secretPrompt = 'Enter the TOTP secret (base32, e.g. JBSWY3DPEHPK3PXP):'
-            folder, ok = QInputDialog.getText(self, 'Folder', 'Enter folder name:')
+            existingFolders = list(self.secrets.keys())
+            if existingFolders:
+                folder, ok = QInputDialog.getItem(
+                    self, 'Folder', 'Choose an existing folder, or type a new name:',
+                    existingFolders, 0, True
+                )
+            else:
+                folder, ok = QInputDialog.getText(self, 'Folder', 'Enter a folder name:')
             if not ok or not folder:
+                return
+            folder = folder.strip()
+            if not folder:
                 return
             existing = self.secrets.get(folder, [])
             if any(isinstance(e, dict) and not isDummyEntry(e) and e.get('label') == label for e in existing):
@@ -777,8 +787,18 @@ class OrganizeAccountsDialog(QDialog):
             QMessageBox.warning(self, 'Move Error', f'Could not find account "{label}" in folder "{folder}".')
             return
         # Ask for new folder before mutating anything, so a cancel is a true no-op
-        newFolder, ok = QInputDialog.getText(self, 'Move to Folder', 'Enter folder name:')
-        if not ok or not newFolder or newFolder == folder:
+        otherFolders = [f for f in self.parentWidget.secrets.keys() if f != folder]
+        if otherFolders:
+            newFolder, ok = QInputDialog.getItem(
+                self, 'Move to Folder', 'Choose an existing folder, or type a new name:',
+                otherFolders, 0, True
+            )
+        else:
+            newFolder, ok = QInputDialog.getText(self, 'Move to Folder', 'Enter a folder name:')
+        if not ok or not newFolder:
+            return
+        newFolder = newFolder.strip()
+        if not newFolder or newFolder == folder:
             return
         entryToMove = entries.pop(entryIdx)
         if newFolder not in self.parentWidget.secrets:
