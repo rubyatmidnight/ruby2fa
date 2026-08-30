@@ -1,5 +1,10 @@
 # Ruby2FA TOTP Desktop App
 
+## Update 7/11/2026 15:00 PST
+ - Improved usability a bit in category handling
+ - Some no-op bugs fixed
+ - Some silent fails when duplicating names issues fixed
+
 ## Summary
 
 This is a simple, functional security-minded TOTP 2FA app for desktop. Currently you can run it via python, but in the near future I want to release an exe as well for non-power users. This came about because I got tired of how bad google authenticator is, and how authy and other apps want me to give them money
@@ -68,23 +73,24 @@ This includes:
      ```
    - The Ruby2FA window will open. Alternatively, use the shortcut options provided with the quickstart files.
 
-5. **Add an account**  
+5. **Add an account**
+      - Want to test it first to make sure it works? Try a quick topt generating site or tool like: https://totp.danhersam.com/
    - The add/remove buttons are in the menu.
    - Click "Add" to enter a label and your TOTP secret, or  
    - Click "Scan QR" to capture a QR code from your screen.
     - ###### Note: This only works on your primary monitor, if the code is on a secondary monitor, it will not capture. Move the QR code to your main screen to use this function, and make sure the QR code isn't obscured.  
 
-6. **Copy a code**  
+7. **Copy a code**  
    - Select an account and click "Copy Code" to copy the current code to your clipboard.  
    - The clipboard will auto-clear after a configured number of seconds.
 
-7. **Backup your secrets**  
+8. **Backup your secrets**  
    - Backup your `rubykey.json.enc` file to keep your accounts safe.
 
-8. **Lock/Unlock**  
+9. **Lock/Unlock**  
    - The app auto-locks after inactivity. Enter your master password to unlock.
 
-9. **Adjust settings**
+10. **Adjust settings**
    - Write in folder names per key, and put different keys in different folders. Currently not super modular; cannot move folder names around freely, partially because of how the encryption is done. 
 
 **Important:**  
